@@ -1,0 +1,16 @@
+name: Sincronizzazione Automatica Fork
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fork Sync
+        uses: tgymnich/fork-sync@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          head: main
