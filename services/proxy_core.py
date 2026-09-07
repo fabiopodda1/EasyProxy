@@ -353,7 +353,7 @@ class HLSProxyCoreMixin:
                     consecutive_failures = 0
                     continue
 
-                healthy, reason = await self._probe_warp(timeout_sec=8)
+                healthy, reason = await self._probe_warp(timeout_sec=12)
                 if healthy:
                     if consecutive_failures:
                         logger.warning(
@@ -389,6 +389,28 @@ class HLSProxyCoreMixin:
         """Fast check if WARP proxy socket and HTTP connectivity are working."""
         healthy, _reason = await self._probe_warp(timeout_sec=timeout_sec)
         return healthy
+
+    async def _restart_warp_if_socket_unhealthy(self, reason: str) -> bool:
+        """Recover a stalled local WireProxy listener without masking origin errors."""
+        if not any(
+            marker in reason
+            for marker in ("component=wireproxy_socket", "component=wireproxy_process")
+        ):
+            return False
+
+        result = await self.reconnect_warp()
+        if (
+            result.get("status") == "ok"
+            and result.get("message") == "WARP userspace tunnel reconnected"
+        ):
+            logger.warning("WARP socket recovery restarted wireproxy")
+            return True
+
+        logger.warning(
+            "WARP socket recovery skipped/failed: %s",
+            result.get("message") or result,
+        )
+        return False
 
     async def get_warp_status(self) -> str:
         """Returns WARP status and fetches real external IP through WARP proxy."""
@@ -611,6 +633,11 @@ class HLSProxyCoreMixin:
                 "enable_cleanup_closed": True,
                 "use_dns_cache": True,
             }
+            # The known-good MPD path used IPv4 for DIRECT connections.
+            # Keep WARP/proxy routes dual-stack; this only avoids broken VPS
+            # IPv6 paths for direct CDN requests.
+            if not prefer_default_family:
+                connector_kwargs["family"] = socket.AF_INET
             connector = TCPConnector(**connector_kwargs)
             session = aiohttp.ClientSession(
                 timeout=ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30),
@@ -936,20 +963,6 @@ class HLSProxyCoreMixin:
 
     async def cleanup(self):
         """Pulizia delle risorse"""
-        prefetch_tasks = list(getattr(self, "prefetch_tasks", set()))
-        for task in prefetch_tasks:
-            task.cancel()
-        if prefetch_tasks:
-            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
-        self.prefetch_tasks.clear()
-        for entry in getattr(self, "_segment_prefetch_cache", {}).values():
-            timer = entry.get("timer")
-            if timer:
-                timer.cancel()
-        getattr(self, "_segment_prefetch_cache", {}).clear()
-        getattr(self, "_segment_next_urls", {}).clear()
-        getattr(self, "_hls_playlist_cache", {}).clear()
-
         tasks = list(self._background_tasks)
         for task in tasks:
             task.cancel()
